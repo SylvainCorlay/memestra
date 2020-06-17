@@ -218,43 +218,63 @@ class Cache(object):
         else:
             user_config_dir = xdg_config_home
             memestra_dir = 'memestra'
-        self.cachedir = os.path.expanduser(os.path.join(user_config_dir,
-                                                        memestra_dir))
-        os.makedirs(self.cachedir, exist_ok=True)
 
-    def _get_path(self, key):
-        return os.path.join(self.cachedir, key.module_hash)
+        user_cache = os.path.expanduser(os.path.join(user_config_dir,
+                                                     memestra_dir))
+        pkg_cache = os.path.join(os.path.dirname(__file__), "cache")
+
+        self.user_cache = user_cache
+
+        # The lookup order is user first, system last.
+        # That way user can overwrite system behavior if they want to.
+        self.cachedirs = user_cache, pkg_cache
+
+        for cachedir in self.cachedirs:
+            os.makedirs(cachedir, exist_ok=True)
+
+    def _get_path(self, cachedir, key):
+        path = os.path.join(cachedir, key.module_hash)
+        return path, os.path.isfile(path)
 
     def __contains__(self, key):
-        cache_path = self._get_path(key)
-        return os.path.isfile(cache_path)
+        for cachedir in self.cachedirs:
+            cache_path, path_exists = self._get_path(cachedir, key)
+            if path_exists:
+                return True
+        return False
 
     def __getitem__(self, key):
-        cache_path = self._get_path(key)
-        with open(cache_path, 'r') as yaml_fd:
-            return yaml.load(yaml_fd, Loader=yaml.SafeLoader)
+        for cachedir in self.cachedirs:
+            cache_path, path_exists = self._get_path(cachedir, key)
+            if path_exists:
+                with open(cache_path, 'r') as yaml_fd:
+                    return yaml.load(yaml_fd, Loader=yaml.SafeLoader)
+        raise KeyError(key)
 
     def __setitem__(self, key, data):
         data = data.copy()
         Format.setdefaults(data, name=key.name)
         Format.check(data)
-        cache_path = self._get_path(key)
+        # always set item in user_cache. pkg_cache is for pkg only
+        cache_path, _ = self._get_path(self.user_cache, key)
         with open(cache_path, 'w') as yaml_fd:
             yaml.dump(data, yaml_fd)
 
     def keys(self):
-        return os.listdir(self.cachedir)
+        all_keys = set()
+        for cachedir in self.cachedirs:
+            all_keys.update(os.listdir(cachedir))
+        return sorted(all_keys)
 
     def items(self):
         for key in self.keys():
-            cache_path = os.path.join(self.cachedir, key)
-            with open(cache_path, 'r') as yaml_fd:
-                yield key, yaml.load(yaml_fd, Loader=yaml.SafeLoader)
+            yield key, self[key]
 
     def clear(self):
+        # not clearing the pkg_cache
         count = 0
         for key in self.keys():
-            cache_path = os.path.join(self.cachedir, key)
+            cache_path, _ = self._get_path(self.user_cache, key)
             os.remove(cache_path)
             count += 1
         return count
